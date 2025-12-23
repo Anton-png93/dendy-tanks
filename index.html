@@ -1,0 +1,1070 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Dendy Tanks</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #05070b;
+      color: #e7e9ee;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      touch-action: none; /* важно для телефона, чтобы не скроллило */
+      overflow: hidden;
+    }
+
+    .wrap {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+    }
+
+    canvas {
+      width: min(100vw, 600px);
+      height: min(100vw, 600px);
+      max-height: 90vh;
+      background: #111827;
+      border: 2px solid #4b5563;
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.5);
+      image-rendering: pixelated;
+      touch-action: none;
+    }
+
+    .hint {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 6px;
+      text-align: center;
+      font-size: 12px;
+      color: #9ca3af;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="game" width="416" height="416"></canvas>
+  </div>
+  <div class="hint">v0.2 • стрелки/пробел • телефон: левый палец — движение, правый — выстрел</div>
+
+  <script>
+    // === БАЗА CANVAS ===
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    const GRID_SIZE = 13;
+    const TILE_SIZE = Math.floor(canvas.height / GRID_SIZE);
+
+    // === СОСТОЯНИЯ ИГРЫ ===
+    const STATE = { MENU: "menu", PLAY: "play", GAMEOVER: "gameover", WIN: "win" };
+    let gameState = STATE.MENU;
+
+    // === ТАЙЛЫ КАРТЫ ===
+    const TILE = { EMPTY: 0, BRICK: 1, STEEL: 2 };
+
+    const level1Raw = [
+      ".....BBB.....",
+      ".............",
+      "..BBB...BBB..",
+      "..BBB...BBB..",
+      ".....BBB.....",
+      "BBB.......BBB",
+      "BBB...S...BBB",
+      "BBB.......BBB",
+      ".....BBB.....",
+      "..BBB...BBB..",
+      "..BBB...BBB..",
+      ".B.........BB",
+      "BB.........BB"
+    ];
+
+    const level = [];
+    const brickMask = [];
+
+    for (let y = 0; y < GRID_SIZE; y++) {
+      const row = [];
+      const maskRow = [];
+      const line = level1Raw[y];
+
+      for (let x = 0; x < GRID_SIZE; x++) {
+        const ch = line[x];
+        if (ch === 'B') { row.push(TILE.BRICK); maskRow.push(0b1111); }
+        else if (ch === 'S') { row.push(TILE.STEEL); maskRow.push(0); }
+        else { row.push(TILE.EMPTY); maskRow.push(0); }
+      }
+
+      level.push(row);
+      brickMask.push(maskRow);
+    }
+
+    function drawLevel() {
+      for (let y = 0; y < GRID_SIZE; y++) {
+        for (let x = 0; x < GRID_SIZE; x++) {
+          const tile = level[y][x];
+          if (tile === TILE.EMPTY) continue;
+
+          const px = x * TILE_SIZE;
+          const py = y * TILE_SIZE;
+
+          if (tile === TILE.BRICK) {
+            const mask = brickMask[y][x];
+            const half = TILE_SIZE / 2;
+
+            ctx.fillStyle = "#c4572f";
+            ctx.strokeStyle = "#8b3a1a";
+            ctx.lineWidth = 1;
+
+            if (mask & 0b0001) { ctx.fillRect(px, py, half, half); ctx.strokeRect(px, py, half, half); }
+            if (mask & 0b0010) { ctx.fillRect(px + half, py, half, half); ctx.strokeRect(px + half, py, half, half); }
+            if (mask & 0b0100) { ctx.fillRect(px, py + half, half, half); ctx.strokeRect(px, py + half, half, half); }
+            if (mask & 0b1000) { ctx.fillRect(px + half, py + half, half, half); ctx.strokeRect(px + half, py + half, half, half); }
+
+            if (mask === 0) level[y][x] = TILE.EMPTY;
+          }
+
+          if (tile === TILE.STEEL) {
+            ctx.fillStyle = "#bfc6d8";
+            ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+            ctx.fillStyle = "#8992a8";
+            ctx.fillRect(px + 4, py + 4, TILE_SIZE - 8, TILE_SIZE - 8);
+          }
+        }
+      }
+    }
+
+    // === ОРЁЛ (БАЗА) ===
+    const EAGLE_TILE_X = 6;
+    const EAGLE_TILE_Y = 12;
+
+    const eagle = {
+      x: EAGLE_TILE_X * TILE_SIZE + TILE_SIZE / 2,
+      y: EAGLE_TILE_Y * TILE_SIZE + TILE_SIZE / 2,
+      size: 18,
+      alive: true
+    };
+
+    function drawEagle() {
+      if (!eagle.alive) return;
+      const r = eagle.size / 2;
+      ctx.fillStyle = "#fbbf24";
+      ctx.fillRect(eagle.x - r, eagle.y - r, eagle.size, eagle.size);
+      ctx.fillStyle = "#111827";
+      ctx.fillRect(eagle.x - r + 4, eagle.y - r + 4, eagle.size - 8, eagle.size - 8);
+    }
+
+    // === ИГРОК ===
+    const playerStart = { x: TILE_SIZE * 6 + TILE_SIZE / 2, y: TILE_SIZE * 11 + TILE_SIZE / 2 };
+    const player = {
+      x: playerStart.x,
+      y: playerStart.y,
+      size: 26,
+      dir: 0,
+      speed: 2.0,
+    };
+
+    let playerLives = 3;
+    let playerInvuln = 0;
+    const PLAYER_INVULN_TIME = 60;
+
+    // === ВРАГИ: 4 ОДНОВРЕМЕННО, 12 ВСЕГО ===
+    const MAX_ENEMIES_ALIVE = 4;
+    const MAX_ENEMIES_TOTAL = 12;
+
+    let enemiesKilled = 0;
+    let enemiesSpawned = 0;
+
+    // 4 спавна сверху
+    const enemySpawns = [
+      { x: TILE_SIZE * 1 + TILE_SIZE / 2,  y: TILE_SIZE * 1 + TILE_SIZE / 2 },
+      { x: TILE_SIZE * 4 + TILE_SIZE / 2,  y: TILE_SIZE * 1 + TILE_SIZE / 2 },
+      { x: TILE_SIZE * 8 + TILE_SIZE / 2,  y: TILE_SIZE * 1 + TILE_SIZE / 2 },
+      { x: TILE_SIZE * 11 + TILE_SIZE / 2, y: TILE_SIZE * 1 + TILE_SIZE / 2 },
+    ];
+
+    const enemies = []; // живые враги
+
+    // === ПУЛИ ===
+    const bullets = [];
+    const enemyBullets = [];
+    const BULLET_SPEED = 5;
+    const ENEMY_BULLET_SPEED = 5;
+
+    // === AI НАСТРОЙКИ (Battle City feeling) ===
+    const ENEMY_GRID = TILE_SIZE; // 32px
+    const ENEMY_MIN_SHOOT_DELAY = 0.55; // чуть реже, меньше хаоса
+    const ENEMY_MAX_SHOOT_DELAY = 1.20;
+
+    function enemyPickShootDelay(e) {
+      e.shootEvery = ENEMY_MIN_SHOOT_DELAY + Math.random() * (ENEMY_MAX_SHOOT_DELAY - ENEMY_MIN_SHOOT_DELAY);
+    }
+
+    // === УПРАВЛЕНИЕ (клава + телефон) ===
+    const keys = { ArrowUp:false, ArrowDown:false, ArrowLeft:false, ArrowRight:false, Space:false };
+    // true = телефон/планшет, false = ПК
+    const IS_MOBILE = window.matchMedia("(pointer: coarse)").matches;
+    // === MOBILE CONTROLS (D-PAD + FIRE) ===
+let touchIdMove = null;
+let touchIdFire = null;
+
+// зоны управления (в пикселях canvas)
+const DPAD_SIZE = 150;   // размер квадрата D-pad
+const FIRE_SIZE = 120;   // размер кнопки огня
+const MARGIN = 18;       // отступ от края
+
+function getTouchPos(t) {
+  const r = canvas.getBoundingClientRect();
+  const sx = canvas.width / r.width;
+  const sy = canvas.height / r.height;
+  return { x: (t.clientX - r.left) * sx, y: (t.clientY - r.top) * sy };
+}
+
+function getDpadRect() {
+  return { x: MARGIN, y: canvas.height - MARGIN - DPAD_SIZE, w: DPAD_SIZE, h: DPAD_SIZE };
+}
+
+function getFireRect() {
+  return { x: canvas.width - MARGIN - FIRE_SIZE, y: canvas.height - MARGIN - FIRE_SIZE, w: FIRE_SIZE, h: FIRE_SIZE };
+}
+
+function pointInRect(p, r) {
+  return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+}
+
+function clearMoveKeys() {
+  keys.ArrowUp = keys.ArrowDown = keys.ArrowLeft = keys.ArrowRight = false;
+}
+
+function setMoveFromDpadPos(p) {
+  const r = getDpadRect();
+  const cx = r.x + r.w / 2;
+  const cy = r.y + r.h / 2;
+
+  const dx = p.x - cx;
+  const dy = p.y - cy;
+
+  clearMoveKeys();
+
+  // выбираем одно направление (как на денди)
+  if (Math.abs(dx) > Math.abs(dy)) {
+    if (dx > 12) { keys.ArrowRight = true; player.dir = 1; }
+    else if (dx < -12) { keys.ArrowLeft = true; player.dir = 3; }
+  } else {
+    if (dy > 12) { keys.ArrowDown = true; player.dir = 2; }
+    else if (dy < -12) { keys.ArrowUp = true; player.dir = 0; }
+  }
+}
+    window.addEventListener('keydown', (e) => {
+      if (e.code in keys) { keys[e.code] = true; e.preventDefault(); }
+    });
+    window.addEventListener('keyup', (e) => {
+      if (e.code in keys) { keys[e.code] = false; e.preventDefault(); }
+    });
+
+    canvas.addEventListener('click', () => {
+  if (gameState === STATE.MENU) gameStart();
+  else if (gameState === STATE.GAMEOVER || gameState === STATE.WIN) gameRestart();
+  });
+
+    if (IS_MOBILE) {
+    canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+
+  // меню/рестарт: тап по экрану
+  if (gameState === STATE.MENU) { gameStart(); return; }
+  if (gameState === STATE.GAMEOVER || gameState === STATE.WIN) { gameRestart(); return; }
+
+  const dpad = getDpadRect();
+  const fire = getFireRect();
+
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    const p = getTouchPos(t);
+
+    // D-PAD
+    if (touchIdMove === null && pointInRect(p, dpad)) {
+      touchIdMove = t.identifier;
+      setMoveFromDpadPos(p);
+      continue;
+    }
+
+    // FIRE
+    if (touchIdFire === null && pointInRect(p, fire)) {
+      touchIdFire = t.identifier;
+      keys.Space = true;
+      continue;
+    }
+  }
+}, { passive:false });
+
+  if (IS_MOBILE) {
+   canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+
+  if (gameState !== STATE.PLAY) return;
+
+  const dpad = getDpadRect();
+
+  for (let i = 0; i < e.touches.length; i++) {
+    const t = e.touches[i];
+    if (t.identifier !== touchIdMove) continue;
+
+    const p = getTouchPos(t);
+    if (pointInRect(p, dpad)) {
+      setMoveFromDpadPos(p);
+    } else {
+      // палец вышел из зоны — остановка
+      clearMoveKeys();
+    }
+  }
+}, { passive:false });
+
+canvas.addEventListener('touchend', (e) => {
+  e.preventDefault();
+
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+
+    // отпустили D-PAD
+    if (t.identifier === touchIdMove) {
+      touchIdMove = null;
+      clearMoveKeys();
+    }
+
+    // отпустили FIRE
+    if (t.identifier === touchIdFire) {
+      touchIdFire = null;
+      keys.Space = false;
+    }
+  }
+}, { passive:false });
+
+canvas.addEventListener('touchcancel', (e) => {
+  e.preventDefault();
+  touchIdMove = null;
+  touchIdFire = null;
+  clearMoveKeys();
+  keys.Space = false;
+}, { passive:false });
+  }
+}
+    // === ДВИЖЕНИЕ И СТОЛКНОВЕНИЯ ===
+    function canTankMoveTo(nx, ny, size) {
+      const PADDING = 0.75;
+      const r = (size / 2) - PADDING;
+
+      const left = nx - r, right = nx + r, top = ny - r, bottom = ny + r;
+
+      if (left < 0 || right > canvas.width || top < 0 || bottom > canvas.height) return false;
+
+      const EPS = 0.001;
+      const tileLeft = Math.floor((left + EPS) / TILE_SIZE);
+      const tileRight = Math.floor((right - EPS) / TILE_SIZE);
+      const tileTop = Math.floor((top + EPS) / TILE_SIZE);
+      const tileBottom = Math.floor((bottom - EPS) / TILE_SIZE);
+
+      for (let ty = tileTop; ty <= tileBottom; ty++) {
+        for (let tx = tileLeft; tx <= tileRight; tx++) {
+          if (tx < 0 || tx >= GRID_SIZE || ty < 0 || ty >= GRID_SIZE) return false;
+          const cell = level[ty][tx];
+          if (cell === TILE.BRICK || cell === TILE.STEEL) return false;
+        }
+      }
+      return true;
+    }
+
+    function tileIsBlocking(tx, ty) {
+      if (tx < 0 || tx >= GRID_SIZE || ty < 0 || ty >= GRID_SIZE) return true;
+      const t = level[ty][tx];
+      return (t === TILE.BRICK || t === TILE.STEEL);
+    }
+
+    function dirToDelta(dir){
+      if (dir === 0) return { dx: 0, dy: -1 };
+      if (dir === 1) return { dx: 1, dy: 0 };
+      if (dir === 2) return { dx: 0, dy: 1 };
+      return { dx: -1, dy: 0 };
+    }
+
+    // === ИГРОК: ДВИЖЕНИЕ ===
+    function updatePlayer() {
+      let dx = 0, dy = 0;
+
+      if (keys.ArrowUp)    { dy = -1; player.dir = 0; }
+      if (keys.ArrowRight) { dx =  1; player.dir = 1; }
+      if (keys.ArrowDown)  { dy =  1; player.dir = 2; }
+      if (keys.ArrowLeft)  { dx = -1; player.dir = 3; }
+
+      if (dx !== 0 && dy !== 0) { dx = 0; dy = 0; }
+      if (dx === 0 && dy === 0) return;
+
+      const nx = player.x + dx * player.speed;
+      const ny = player.y + dy * player.speed;
+
+      if (canTankMoveTo(nx, ny, player.size)) { player.x = nx; player.y = ny; }
+    }
+
+    // === СТРЕЛЬБА ИГРОКА ===
+    let canShoot = true;
+    const SHOOT_DELAY = 200;
+
+    function tryShoot() {
+      if (!keys.Space || !canShoot) return;
+      canShoot = false;
+      setTimeout(() => { canShoot = true; }, SHOOT_DELAY);
+
+      const r = player.size / 2;
+      let bx = player.x, by = player.y, bdx = 0, bdy = 0;
+
+      switch (player.dir) {
+        case 0: bdy = -1; by -= r; break;
+        case 1: bdx =  1; bx += r; break;
+        case 2: bdy =  1; by += r; break;
+        case 3: bdx = -1; bx -= r; break;
+      }
+
+      bullets.push({ x: bx, y: by, dx: bdx, dy: bdy, size: 6 });
+    }
+
+    // === СПАВН ВРАГОВ ===
+    function spawnEnemy() {
+      if (enemiesSpawned >= MAX_ENEMIES_TOTAL) return;
+      if (enemies.length >= MAX_ENEMIES_ALIVE) return;
+
+      // берём свободный спавн (чтобы не наезжали друг на друга)
+      for (let i = 0; i < enemySpawns.length; i++) {
+        const s = enemySpawns[i];
+        let ok = true;
+        for (const e of enemies) {
+          const d = Math.abs(e.x - s.x) + Math.abs(e.y - s.y);
+          if (d < 20) { ok = false; break; }
+        }
+        if (!ok) continue;
+
+        const e = {
+          x: s.x, y: s.y,
+          size: 26,
+          dir: 2,
+          speed: 1.0,           // медленнее игрока
+          _leftToGo: 0,
+          _recentTiles: [],
+          _blockedCooldown: 0,
+          shootTimer: 0,
+          shootEvery: 0,
+        };
+        enemyPickShootDelay(e);
+
+        enemies.push(e);
+        enemiesSpawned++;
+        return;
+      }
+    }
+
+    function enemyTilePos(e) {
+      return { x: Math.floor(e.x / TILE_SIZE), y: Math.floor(e.y / TILE_SIZE) };
+    }
+
+    function enemyWasRecently(e, tx, ty) {
+      const key = ty * 100 + tx;
+      return e._recentTiles.includes(key);
+    }
+
+    function enemyRememberTile(e) {
+      const t = enemyTilePos(e);
+      e._recentTiles.push(t.y * 100 + t.x);
+      if (e._recentTiles.length > 6) e._recentTiles.shift();
+    }
+
+    function snapEnemyToLane(e) {
+  // прищёлкиваем к центрам тайлов 16,48,80... но безопасно (не в стену)
+  const off = TILE_SIZE / 2;
+
+  if (e.dir === 0 || e.dir === 2) {
+    // едем вертикально -> подравниваем X
+    const base = Math.round((e.x - off) / ENEMY_GRID) * ENEMY_GRID + off;
+    const candidates = [base, base - ENEMY_GRID, base + ENEMY_GRID];
+
+    for (const cx of candidates) {
+      if (canTankMoveTo(cx, e.y, e.size)) { e.x = cx; return; }
+    }
+   
+  } else {
+    // едем горизонтально -> подравниваем Y
+    const base = Math.round((e.y - off) / ENEMY_GRID) * ENEMY_GRID + off;
+    const candidates = [base, base - ENEMY_GRID, base + ENEMY_GRID];
+
+    for (const cy of candidates) {
+      if (canTankMoveTo(e.x, cy, e.size)) { e.y = cy; return; }
+    }
+
+  }
+}
+
+    function snapEnemyToGridFull(e) {
+  const off = TILE_SIZE / 2;
+
+  e.x = Math.round((e.x - off) / ENEMY_GRID) * ENEMY_GRID + off;
+  e.y = Math.round((e.y - off) / ENEMY_GRID) * ENEMY_GRID + off;
+}
+
+    function enemyCanMoveTo(e, nx, ny) {
+      return canTankMoveTo(nx, ny, e.size);
+    }
+
+    function enemyChooseDirAtJunction(e) {
+      const eT = enemyTilePos(e);
+
+      const options = [];
+      for (const d of [0,1,2,3]) {
+        const v = dirToDelta(d);
+        const testX = e.x + v.dx * e.speed;
+        const testY = e.y + v.dy * e.speed;
+        if (enemyCanMoveTo(e, testX, testY)) options.push(d);
+      }
+      if (options.length === 0) return;
+
+      // цель: чаще орёл, иногда игрок
+      const pT = { x: Math.floor(player.x / TILE_SIZE), y: Math.floor(player.y / TILE_SIZE) };
+      let targetX = EAGLE_TILE_X, targetY = EAGLE_TILE_Y;
+      if (Math.random() < 0.30) { targetX = pT.x; targetY = pT.y; }
+
+      const back = (e.dir + 2) % 4;
+
+      let bestDir = null;
+      let bestScore = Infinity;
+
+      for (const d of options) {
+        const v = dirToDelta(d);
+        const nx = eT.x + v.dx;
+        const ny = eT.y + v.dy;
+
+        let score = Math.abs(nx - targetX) + Math.abs(ny - targetY);
+        if (d === back) score += 0.9;
+        if (enemyWasRecently(e, nx, ny)) score += 1.2;
+
+        // очень маленький рандом, чтобы не было "робота"
+        score += Math.random() * 0.05;
+
+        if (score < bestScore) { bestScore = score; bestDir = d; }
+      }
+
+      if (bestDir !== null) e.dir = bestDir;
+    }
+
+    function enemyChooseDirWhenBlocked(e) {
+      const forward = e.dir;
+      const back = (forward + 2) % 4;
+      const left = (forward + 3) % 4;
+      const right = (forward + 1) % 4;
+
+      const prefer = [left, right, back];
+
+      for (const d of prefer) {
+        const v = dirToDelta(d);
+        const testX = e.x + v.dx * e.speed;
+        const testY = e.y + v.dy * e.speed;
+        if (enemyCanMoveTo(e, testX, testY)) { e.dir = d; return true; }
+      }
+      return false;
+    }
+
+    function updateEnemyOne(e) {
+  // анти-дёрг таймер
+  if (e._blockedCooldown > 0) e._blockedCooldown--;
+
+  if (e._leftToGo <= 0) {
+    snapEnemyToLane(e);
+    enemyRememberTile(e);
+    enemyChooseDirAtJunction(e);
+    e._leftToGo = ENEMY_GRID;
+  }
+
+  const step = Math.min(e.speed, e._leftToGo);
+  const { dx, dy } = dirToDelta(e.dir);
+
+  const nx = e.x + dx * step;
+  const ny = e.y + dy * step;
+
+  if (!enemyCanMoveTo(e, nx, ny)) {
+    // при упоре НЕ даём менять направление каждый кадр
+    snapEnemyToLane(e);
+
+    if (e._blockedCooldown > 0) {
+      // просто ждём немного и пробуем ехать дальше
+      e._leftToGo = ENEMY_GRID;
+      return;
+    }
+
+    const ok = enemyChooseDirWhenBlocked(e);
+
+    // если вообще некуда — сбрасываем анти-круг, чтобы вышел из тупика
+    if (!ok) e._recentTiles.length = 0;
+
+    // ставим задержку, чтобы не было "тррр-тррр" у стены
+    e._blockedCooldown = 12;
+
+    // микро-толчок на 1px в НОВОМ направлении — помогает отлипать
+    const v2 = dirToDelta(e.dir);
+    const pushX = e.x + v2.dx * 1;
+    const pushY = e.y + v2.dy * 1;
+    if (enemyCanMoveTo(e, pushX, pushY)) {
+      e.x = pushX;
+      e.y = pushY;
+    }
+
+    // продолжаем идти сеточным шагом, а не "думать" каждый кадр
+    e._leftToGo = ENEMY_GRID;
+    return;
+  }
+
+  e.x = nx;
+  e.y = ny;
+  e._leftToGo -= step;
+}
+
+    function enemyHasLineOfSightToTile(e, tx, ty) {
+      const ex = Math.floor(e.x / TILE_SIZE);
+      const ey = Math.floor(e.y / TILE_SIZE);
+
+      if (ex === tx) {
+        const step = (ty > ey) ? 1 : -1;
+        for (let y = ey + step; y !== ty; y += step) if (tileIsBlocking(ex, y)) return false;
+        return true;
+      }
+
+      if (ey === ty) {
+        const step = (tx > ex) ? 1 : -1;
+        for (let x = ex + step; x !== tx; x += step) if (tileIsBlocking(x, ey)) return false;
+        return true;
+      }
+
+      return false;
+    }
+
+    function enemyBrickAhead(e) {
+      const t = enemyTilePos(e);
+      const v = dirToDelta(e.dir);
+      const nx = t.x + v.dx;
+      const ny = t.y + v.dy;
+      if (nx < 0 || nx >= GRID_SIZE || ny < 0 || ny >= GRID_SIZE) return false;
+      return level[ny][nx] === TILE.BRICK;
+    }
+
+    function enemyTryShootOne(e) {
+      // максимум 1 пуля на каждого врага одновременно
+      let ownBulletCount = 0;
+      for (const b of enemyBullets) if (b.owner === e) ownBulletCount++;
+      if (ownBulletCount > 0) return;
+
+      e.shootTimer += 1/60;
+      if (e.shootTimer < e.shootEvery) return;
+
+      const eT = { x: Math.floor(e.x / TILE_SIZE), y: Math.floor(e.y / TILE_SIZE) };
+      const pT = { x: Math.floor(player.x / TILE_SIZE), y: Math.floor(player.y / TILE_SIZE) };
+      const distToPlayer = Math.abs(eT.x - pT.x) + Math.abs(eT.y - pT.y);
+
+      const seesPlayer = enemyHasLineOfSightToTile(e, pT.x, pT.y);
+      const seesEagle  = enemyHasLineOfSightToTile(e, EAGLE_TILE_X, EAGLE_TILE_Y);
+
+      let wantShoot = false;
+
+      if (seesPlayer && Math.random() < 0.70) wantShoot = true;
+      if (!wantShoot && distToPlayer <= 3 && Math.random() < 0.25) wantShoot = true;
+      if (!wantShoot && seesEagle && Math.random() < 0.30) wantShoot = true;
+      if (!wantShoot && enemyBrickAhead(e) && Math.random() < 0.25) wantShoot = true;
+
+      if (!wantShoot) return;
+
+      e.shootTimer = 0;
+      enemyPickShootDelay(e);
+
+      const r = e.size / 2;
+      let bx = e.x, by = e.y, bdx = 0, bdy = 0;
+
+      switch (e.dir) {
+        case 0: bdy = -1; by -= r; break;
+        case 1: bdx =  1; bx += r; break;
+        case 2: bdy =  1; by += r; break;
+        case 3: bdx = -1; bx -= r; break;
+      }
+
+      enemyBullets.push({ x: bx, y: by, dx: bdx, dy: bdy, size: 6, owner: e });
+    }
+
+    function updateEnemies() {
+      // держим 4 живых, пока не заспавнили 12
+      while (enemies.length < MAX_ENEMIES_ALIVE && enemiesSpawned < MAX_ENEMIES_TOTAL) spawnEnemy();
+
+      for (const e of enemies) {
+        updateEnemyOne(e);
+        enemyTryShootOne(e);
+
+        // === ВРАГ ДОЕХАЛ ДО ОРЛА = GAME OVER ===
+        if (eagle.alive) {
+          const er = eagle.size / 2;
+          const tr = e.size / 2;
+          if (
+            e.x + tr >= eagle.x - er && e.x - tr <= eagle.x + er &&
+            e.y + tr >= eagle.y - er && e.y - tr <= eagle.y + er
+          ) {
+            eagle.alive = false;
+            gameState = STATE.GAMEOVER;
+          }
+        }
+      }
+    }
+
+    // === ПУЛИ: ОБНОВЛЕНИЕ ===
+    function updateBullets() {
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        const b = bullets[i];
+        b.x += b.dx * BULLET_SPEED;
+        b.y += b.dy * BULLET_SPEED;
+
+        if (b.x < 0 || b.x > canvas.width || b.y < 0 || b.y > canvas.height) {
+          bullets.splice(i, 1);
+          continue;
+        }
+
+        // попадание по врагу
+        for (let j = enemies.length - 1; j >= 0; j--) {
+          const e = enemies[j];
+          const er = e.size / 2;
+          if (b.x >= e.x - er && b.x <= e.x + er && b.y >= e.y - er && b.y <= e.y + er) {
+            enemies.splice(j, 1);
+            enemiesKilled++;
+            bullets.splice(i, 1);
+
+            // победа: убил 12
+            if (enemiesKilled >= MAX_ENEMIES_TOTAL) {
+              gameState = STATE.WIN;
+            }
+            break;
+          }
+        }
+        if (i >= bullets.length) continue; // если пулю уже удалили — не продолжаем
+
+        // тайл
+        const tx = Math.floor(b.x / TILE_SIZE);
+        const ty = Math.floor(b.y / TILE_SIZE);
+        if (tx < 0 || tx >= GRID_SIZE || ty < 0 || ty >= GRID_SIZE) continue;
+
+        const tile = level[ty][tx];
+
+        if (tile === TILE.BRICK) {
+          let mask = brickMask[ty][tx];
+
+          const TOP_BITS = 0b0011, BOTTOM_BITS = 0b1100, LEFT_BITS = 0b0101, RIGHT_BITS = 0b1010;
+
+          if (b.dy < 0) { if (mask & BOTTOM_BITS) mask &= ~BOTTOM_BITS; else mask &= ~TOP_BITS; }
+          else if (b.dy > 0) { if (mask & TOP_BITS) mask &= ~TOP_BITS; else mask &= ~BOTTOM_BITS; }
+          else if (b.dx > 0) { if (mask & LEFT_BITS) mask &= ~LEFT_BITS; else mask &= ~RIGHT_BITS; }
+          else if (b.dx < 0) { if (mask & RIGHT_BITS) mask &= ~RIGHT_BITS; else mask &= ~LEFT_BITS; }
+
+          brickMask[ty][tx] = mask;
+          if (mask === 0) level[ty][tx] = TILE.EMPTY;
+
+          bullets.splice(i, 1);
+          continue;
+        }
+
+        if (tile === TILE.STEEL) {
+          bullets.splice(i, 1);
+          continue;
+        }
+      }
+    }
+
+    function updateEnemyBullets() {
+      for (let i = enemyBullets.length - 1; i >= 0; i--) {
+        const b = enemyBullets[i];
+        b.x += b.dx * ENEMY_BULLET_SPEED;
+        b.y += b.dy * ENEMY_BULLET_SPEED;
+
+        if (b.x < 0 || b.x > canvas.width || b.y < 0 || b.y > canvas.height) {
+          enemyBullets.splice(i, 1);
+          continue;
+        }
+
+        // попадание в орла = game over
+        if (eagle.alive) {
+          const er = eagle.size / 2;
+          if (b.x >= eagle.x - er && b.x <= eagle.x + er && b.y >= eagle.y - er && b.y <= eagle.y + er) {
+            eagle.alive = false;
+            gameState = STATE.GAMEOVER;
+            enemyBullets.splice(i, 1);
+            continue;
+          }
+        }
+
+        // попадание по игроку
+        const pr = player.size / 2;
+        if (b.x >= player.x - pr && b.x <= player.x + pr && b.y >= player.y - pr && b.y <= player.y + pr) {
+          if (playerInvuln <= 0) {
+            playerLives--;
+            player.x = playerStart.x;
+            player.y = playerStart.y;
+            player.dir = 0;
+            playerInvuln = PLAYER_INVULN_TIME;
+
+            if (playerLives <= 0) gameState = STATE.GAMEOVER;
+          }
+          enemyBullets.splice(i, 1);
+          continue;
+        }
+
+        // тайл
+        const tx = Math.floor(b.x / TILE_SIZE);
+        const ty = Math.floor(b.y / TILE_SIZE);
+        if (tx < 0 || tx >= GRID_SIZE || ty < 0 || ty >= GRID_SIZE) continue;
+
+        const tile = level[ty][tx];
+
+        if (tile === TILE.BRICK) {
+          let mask = brickMask[ty][tx];
+
+          const TOP_BITS = 0b0011, BOTTOM_BITS = 0b1100, LEFT_BITS = 0b0101, RIGHT_BITS = 0b1010;
+
+          if (b.dy < 0) { if (mask & BOTTOM_BITS) mask &= ~BOTTOM_BITS; else mask &= ~TOP_BITS; }
+          else if (b.dy > 0) { if (mask & TOP_BITS) mask &= ~TOP_BITS; else mask &= ~BOTTOM_BITS; }
+          else if (b.dx > 0) { if (mask & LEFT_BITS) mask &= ~LEFT_BITS; else mask &= ~RIGHT_BITS; }
+          else if (b.dx < 0) { if (mask & RIGHT_BITS) mask &= ~RIGHT_BITS; else mask &= ~LEFT_BITS; }
+
+          brickMask[ty][tx] = mask;
+          if (mask === 0) level[ty][tx] = TILE.EMPTY;
+
+          enemyBullets.splice(i, 1);
+          continue;
+        }
+
+        if (tile === TILE.STEEL) {
+          enemyBullets.splice(i, 1);
+          continue;
+        }
+      }
+    }
+
+    // === РИСОВАНИЕ ===
+    function drawBackground() {
+      ctx.fillStyle = '#111827';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.strokeStyle = '#1f2933';
+      ctx.lineWidth = 1;
+      for (let gx = 0; gx <= GRID_SIZE; gx++) {
+        ctx.beginPath();
+        ctx.moveTo(gx * TILE_SIZE, 0);
+        ctx.lineTo(gx * TILE_SIZE, canvas.height);
+        ctx.stroke();
+      }
+      for (let gy = 0; gy <= GRID_SIZE; gy++) {
+        ctx.beginPath();
+        ctx.moveTo(0, gy * TILE_SIZE);
+        ctx.lineTo(canvas.width, gy * TILE_SIZE);
+        ctx.stroke();
+      }
+    }
+
+    function drawPlayer() {
+      const r = player.size / 2;
+      if (playerInvuln > 0 && (playerInvuln % 10) < 5) return;
+
+      ctx.fillStyle = '#9ca3ff';
+      ctx.fillRect(player.x - r, player.y - r, player.size, player.size);
+
+      // ствол
+      ctx.strokeStyle = '#e5e7ff';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      switch (player.dir) {
+        case 0: ctx.moveTo(player.x, player.y - r); ctx.lineTo(player.x, player.y - r - 10); break;
+        case 1: ctx.moveTo(player.x + r, player.y); ctx.lineTo(player.x + r + 10, player.y); break;
+        case 2: ctx.moveTo(player.x, player.y + r); ctx.lineTo(player.x, player.y + r + 10); break;
+        case 3: ctx.moveTo(player.x - r, player.y); ctx.lineTo(player.x - r - 10, player.y); break;
+      }
+      ctx.stroke();
+    }
+
+    function drawEnemies() {
+      for (const e of enemies) {
+        const r = e.size / 2;
+        ctx.fillStyle = '#f97373';
+        ctx.fillRect(e.x - r, e.y - r, e.size, e.size);
+
+        ctx.strokeStyle = '#fee2e2';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        switch (e.dir) {
+          case 0: ctx.moveTo(e.x, e.y - r); ctx.lineTo(e.x, e.y - r - 10); break;
+          case 1: ctx.moveTo(e.x + r, e.y); ctx.lineTo(e.x + r + 10, e.y); break;
+          case 2: ctx.moveTo(e.x, e.y + r); ctx.lineTo(e.x, e.y + r + 10); break;
+          case 3: ctx.moveTo(e.x - r, e.y); ctx.lineTo(e.x - r - 10, e.y); break;
+        }
+        ctx.stroke();
+      }
+    }
+
+    function drawBullets() {
+      ctx.fillStyle = '#f9fafb';
+      for (const b of bullets) ctx.fillRect(b.x - b.size/2, b.y - b.size/2, b.size, b.size);
+    }
+
+    function drawEnemyBullets() {
+      ctx.fillStyle = '#ffd166';
+      for (const b of enemyBullets) ctx.fillRect(b.x - b.size/2, b.y - b.size/2, b.size, b.size);
+    }
+
+    function drawHUD() {
+      ctx.fillStyle = "#e7e9ee";
+      ctx.font = "14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+
+      // слева жизни
+      ctx.textAlign = "left";
+      ctx.fillText("LIVES: " + playerLives, 10, 20);
+
+      // справа 12x (сколько осталось)
+      const leftEnemies = Math.max(0, MAX_ENEMIES_TOTAL - enemiesKilled);
+      ctx.textAlign = "right";
+      ctx.fillText(leftEnemies + "x", canvas.width - 10, 20);
+
+      ctx.textAlign = "left";
+    }
+
+   function drawOverlay(title, subtitle) {
+  ctx.fillStyle = "rgba(0,0,0,0.60)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "center";
+  ctx.font = "42px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+  ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 20);
+
+  ctx.font = "16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+  ctx.fillText(subtitle, canvas.width / 2, canvas.height / 2 + 20);
+
+  ctx.font = "13px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+  ctx.fillText("Нажми/тапни чтобы продолжить", canvas.width / 2, canvas.height / 2 + 50);
+
+  ctx.textAlign = "left";
+}
+
+function drawMobileControls() {
+  const d = getDpadRect();
+  const f = getFireRect();
+
+  ctx.globalAlpha = 0.35;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(d.x, d.y, d.w, d.h);
+  ctx.fillRect(f.x, f.y, f.w, f.h);
+
+  // крестовина
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = "#111827";
+  const cx = d.x + d.w/2, cy = d.y + d.h/2;
+  ctx.fillRect(cx - 12, d.y + 10, 24, d.h - 20);
+  ctx.fillRect(d.x + 10, cy - 12, d.w - 20, 24);
+
+  // FIRE текст
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = "#111827";
+  ctx.textAlign = "center";
+  ctx.font = "16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+  ctx.fillText("FIRE", f.x + f.w/2, f.y + f.h/2 + 6);
+
+  ctx.globalAlpha = 1;
+  ctx.textAlign = "left";
+}
+
+    // === МЕНЮ / РЕСТАРТ ===
+    function resetGameData() {
+      // игрок
+      player.x = playerStart.x;
+      player.y = playerStart.y;
+      player.dir = 0;
+      playerLives = 3;
+      playerInvuln = 0;
+
+      // орёл
+      eagle.alive = true;
+
+      // враги
+      enemies.length = 0;
+      enemiesKilled = 0;
+      enemiesSpawned = 0;
+
+      // пули
+      bullets.length = 0;
+      enemyBullets.length = 0;
+
+      // стартовый спавн 4 врага
+      for (let i=0;i<MAX_ENEMIES_ALIVE;i++) spawnEnemy();
+    }
+
+    function gameStart() {
+      resetGameData();
+      gameState = STATE.PLAY;
+    }
+
+    function gameRestart() {
+      resetGameData();
+      gameState = STATE.PLAY;
+    }
+
+    // === ЦИКЛ ===
+    function loop() {
+      drawBackground();
+      drawLevel();
+      drawEagle();
+
+      if (gameState === STATE.MENU) {
+        drawOverlay("TANK", "START");
+        requestAnimationFrame(loop);
+        return;
+      }
+
+      if (gameState === STATE.PLAY) {
+        updatePlayer();
+        tryShoot();
+        updateEnemies();
+        updateBullets();
+        updateEnemyBullets();
+
+        if (playerInvuln > 0) playerInvuln--;
+
+        drawPlayer();
+        drawEnemies();
+        drawBullets();
+        drawEnemyBullets();
+        drawHUD();
+        if (IS_MOBILE) drawMobileControls();
+
+        requestAnimationFrame(loop);
+        return;
+      }
+
+      // GAMEOVER / WIN — рисуем текущую сцену + оверлей
+      drawPlayer();
+      drawEnemies();
+      drawBullets();
+      drawEnemyBullets();
+      drawHUD();
+
+      if (gameState === STATE.GAMEOVER) {
+        drawOverlay("GAME OVER", "RESTART");
+      } else if (gameState === STATE.WIN) {
+        drawOverlay("VICTORY", "RESTART");
+      }
+
+      requestAnimationFrame(loop);
+    }
+
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
