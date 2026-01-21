@@ -1,11 +1,32 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
+  <script src="/socket.io/socket.io.js"></script>
   <meta charset="utf-8" />
   <meta name="viewport"
         content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Dendy Tanks</title>
   <style>
+  .wrap {
+    position: relative;
+  }
+
+  .netTank {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    z-index: 9999;
+    pointer-events: none;
+  }
+
+  .netTank.me {
+    background: lime;
+  }
+
+  .netTank.other {
+    background: red;
+  }
+
     html, body {
       margin: 0;
       padding: 0;
@@ -168,14 +189,46 @@
       dir: 0,
       speed: 2.0,
     };
+    window.__MY_PLAYER = player;
+    window.__PLAYER_START = playerStart;
+
+    // === NET SPAWN: применяем спавн когда он реально пришёл (даже если позже) ===
+    let __LAST_SPAWN_KEY = null;
+
+    function applyMySpawnIfAny() {
+      const raw = window.__NET_ME_SPAWN;
+      if (!raw) return;
+
+      // сервер может слать либо {x,y,dir}, либо {x,y,dir,spawn:{x,y,dir}}
+      const s = raw.spawn ? raw.spawn : raw;
+
+      const key = `${s.x}|${s.y}|${s.dir ?? 0}`;
+      if (key === __LAST_SPAWN_KEY) return; // уже применяли
+
+      __LAST_SPAWN_KEY = key;
+
+      // обновляем старт (чтобы респавн тоже был правильный)
+      playerStart.x = s.x;
+      playerStart.y = s.y;
+
+      // обновляем позицию игрока
+      player.x = s.x;
+      player.y = s.y;
+      player.dir = s.dir ?? 0;
+
+      console.log("APPLY MY SPAWN:", s);
+    }
+
+    // тут будут храниться другие игроки (из сети) + пули + жизни
+    if (!window.__NET) window.__NET = { others: new Map(), enemyShots: [], lives: new Map() };
 
     let playerLives = 3;
     let playerInvuln = 0;
     const PLAYER_INVULN_TIME = 60;
 
     // === ВРАГИ: 4 ОДНОВРЕМЕННО, 12 ВСЕГО ===
-    const MAX_ENEMIES_ALIVE = 4;
-    const MAX_ENEMIES_TOTAL = 12;
+    const MAX_ENEMIES_ALIVE = 0;
+    const MAX_ENEMIES_TOTAL = 0;
 
     let enemiesKilled = 0;
     let enemiesSpawned = 0;
@@ -376,6 +429,29 @@ canvas.addEventListener('touchcancel', (e) => {
           if (cell === TILE.BRICK || cell === TILE.STEEL) return false;
         }
       }
+
+      // === блок: столкновение с другими игроками (PVP) ===
+      const net = window.__NET;
+      if (net && net.others) {
+        const rMe = (size / 2) - PADDING;
+        for (const [id, op] of net.others) {
+          if (!op) continue;
+
+          const osize = op.size || 26;
+          const rO = osize / 2;
+
+          // AABB пересечение квадратов
+          if (
+            (nx + rMe) >= (op.x - rO) &&
+            (nx - rMe) <= (op.x + rO) &&
+            (ny + rMe) >= (op.y - rO) &&
+            (ny - rMe) <= (op.y + rO)
+          ) {
+            return false;
+          }
+        }
+      }
+
       return true;
     }
 
@@ -430,6 +506,10 @@ canvas.addEventListener('touchcancel', (e) => {
       }
 
       bullets.push({ x: bx, y: by, dx: bdx, dy: bdy, size: 6 });
+      // === PVP: tell multiplayer about shot ===
+      if (window.__NET_SHOOT) {
+        window.__NET_SHOOT({ x: bx, y: by, dx: bdx, dy: bdy });
+      }
     }
 
     // === СПАВН ВРАГОВ ===
@@ -720,6 +800,30 @@ canvas.addEventListener('touchcancel', (e) => {
       }
     }
 
+      function applyBrickHit(tx, ty, dx, dy) {
+        if (tx < 0 || tx >= GRID_SIZE || ty < 0 || ty >= GRID_SIZE) return false;
+        if (level[ty][tx] !== TILE.BRICK) return false;
+
+        let mask = brickMask[ty][tx];
+        const TOP_BITS = 0b0011, BOTTOM_BITS = 0b1100, LEFT_BITS = 0b0101, RIGHT_BITS = 0b1010;
+
+        if (dy < 0) { if (mask & BOTTOM_BITS) mask &= ~BOTTOM_BITS; else mask &= ~TOP_BITS; }
+        else if (dy > 0) { if (mask & TOP_BITS) mask &= ~TOP_BITS; else mask &= ~BOTTOM_BITS; }
+        else if (dx > 0) { if (mask & LEFT_BITS) mask &= ~LEFT_BITS; else mask &= ~RIGHT_BITS; }
+        else if (dx < 0) { if (mask & RIGHT_BITS) mask &= ~RIGHT_BITS; else mask &= ~LEFT_BITS; }
+
+        brickMask[ty][tx] = mask;
+        if (mask === 0) level[ty][tx] = TILE.EMPTY;
+
+        return true;
+      }
+
+      // ЭТО вызывает multiplayer.js когда другой игрок сломал кирпич
+        window.applyBrickHitNet = (payload) => {
+        const { tx, ty, dx, dy } = payload;
+        applyBrickHit(tx, ty, dx, dy);
+      };
+
     // === ПУЛИ: ОБНОВЛЕНИЕ ===
     function updateBullets() {
       for (let i = bullets.length - 1; i >= 0; i--) {
@@ -758,21 +862,15 @@ canvas.addEventListener('touchcancel', (e) => {
         const tile = level[ty][tx];
 
         if (tile === TILE.BRICK) {
-          let mask = brickMask[ty][tx];
+      const changed = applyBrickHit(tx, ty, b.dx, b.dy);
 
-          const TOP_BITS = 0b0011, BOTTOM_BITS = 0b1100, LEFT_BITS = 0b0101, RIGHT_BITS = 0b1010;
-
-          if (b.dy < 0) { if (mask & BOTTOM_BITS) mask &= ~BOTTOM_BITS; else mask &= ~TOP_BITS; }
-          else if (b.dy > 0) { if (mask & TOP_BITS) mask &= ~TOP_BITS; else mask &= ~BOTTOM_BITS; }
-          else if (b.dx > 0) { if (mask & LEFT_BITS) mask &= ~LEFT_BITS; else mask &= ~RIGHT_BITS; }
-          else if (b.dx < 0) { if (mask & RIGHT_BITS) mask &= ~RIGHT_BITS; else mask &= ~LEFT_BITS; }
-
-          brickMask[ty][tx] = mask;
-          if (mask === 0) level[ty][tx] = TILE.EMPTY;
+          if (changed && window.__NET_BRICK_HIT) {
+          window.__NET_BRICK_HIT({ tx, ty, dx: b.dx, dy: b.dy });
+          }
 
           bullets.splice(i, 1);
           continue;
-        }
+          }
 
         if (tile === TILE.STEEL) {
           bullets.splice(i, 1);
@@ -910,6 +1008,35 @@ canvas.addEventListener('touchcancel', (e) => {
       }
     }
 
+        function drawNetPlayers() {
+      const net = window.__NET;
+      if (!net) return;
+
+      for (const [id, p] of net.others) {
+        const size = p.size || 26;
+        const r = size / 2;
+
+        // корпус (зелёный для других игроков)
+        ctx.fillStyle = "#34d399";
+        ctx.fillRect(p.x - r, p.y - r, size, size);
+
+        // ствол — по dir (как у тебя)
+        ctx.strokeStyle = "#d1fae5";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+
+        const dir = (p.dir ?? 0);
+        switch (dir) {
+          case 0: ctx.moveTo(p.x, p.y - r); ctx.lineTo(p.x, p.y - r - 10); break;
+          case 1: ctx.moveTo(p.x + r, p.y); ctx.lineTo(p.x + r + 10, p.y); break;
+          case 2: ctx.moveTo(p.x, p.y + r); ctx.lineTo(p.x, p.y + r + 10); break;
+          case 3: ctx.moveTo(p.x - r, p.y); ctx.lineTo(p.x - r - 10, p.y); break;
+        }
+
+        ctx.stroke();
+      }
+    }
+
     function drawBullets() {
       ctx.fillStyle = '#f9fafb';
       for (const b of bullets) ctx.fillRect(b.x - b.size/2, b.y - b.size/2, b.size, b.size);
@@ -987,6 +1114,10 @@ function drawMobileControls() {
       player.x = playerStart.x;
       player.y = playerStart.y;
       player.dir = 0;
+      // если сервер уже дал spawn — используем его, а не playerStart
+       
+      applyMySpawnIfAny();
+
       playerLives = 3;
       playerInvuln = 0;
 
@@ -1002,8 +1133,9 @@ function drawMobileControls() {
       bullets.length = 0;
       enemyBullets.length = 0;
 
-      // стартовый спавн 4 врага
-      for (let i=0;i<MAX_ENEMIES_ALIVE;i++) spawnEnemy();
+       // стартовый спавн 4 врага
+      //PVP MODE: enemies off
+     // for (let i=0;i<MAX_ENEMIES_ALIVE;i++) spawnEnemy();
     }
 
     function gameStart() {
@@ -1018,6 +1150,7 @@ function drawMobileControls() {
 
     // === ЦИКЛ ===
     function loop() {
+      applyMySpawnIfAny();
       drawBackground();
       drawLevel();
       drawEagle();
@@ -1031,16 +1164,18 @@ function drawMobileControls() {
       if (gameState === STATE.PLAY) {
         updatePlayer();
         tryShoot();
-        updateEnemies();
+       // updateEnemies();
         updateBullets();
-        updateEnemyBullets();
-
+       // updateEnemyBullets();
+        //PVP MODE: enemies off
         if (playerInvuln > 0) playerInvuln--;
 
         drawPlayer();
-        drawEnemies();
+       // drawEnemies();
+        drawNetPlayers();
         drawBullets();
-        drawEnemyBullets();
+       // drawEnemyBullets();
+       //PVP MODE: enemies off
         drawHUD();
         if (IS_MOBILE) drawMobileControls();
 
@@ -1050,9 +1185,11 @@ function drawMobileControls() {
 
       // GAMEOVER / WIN — рисуем текущую сцену + оверлей
       drawPlayer();
-      drawEnemies();
+      //drawEnemies();
+      drawNetPlayers();
       drawBullets();
-      drawEnemyBullets();
+     // drawEnemyBullets();
+     //PVP MODE: enemies off
       drawHUD();
 
       if (gameState === STATE.GAMEOVER) {
@@ -1066,5 +1203,6 @@ function drawMobileControls() {
 
     requestAnimationFrame(loop);
   </script>
+  <script src="multiplayer.js"></script>
 </body>
 </html>
