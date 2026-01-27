@@ -226,6 +226,23 @@
     let playerInvuln = 0;
     const PLAYER_INVULN_TIME = 60;
 
+    // multiplayer.js будет вызывать это, когда сервер меняет мои жизни
+      window.setMyLives = (lives) => {
+        playerLives = lives;
+
+        window.setWin = (deadId) => {
+        gameState = STATE.WIN;
+      };
+
+        // если жизни закончились — поражение
+        if (playerLives <= 0) {
+          gameState = STATE.GAMEOVER;
+        } else {
+          // короткая неуязвимость после респавна (как было с ботами)
+          playerInvuln = PLAYER_INVULN_TIME;
+        }
+      };
+
     // === ВРАГИ: 4 ОДНОВРЕМЕННО, 12 ВСЕГО ===
     const MAX_ENEMIES_ALIVE = 0;
     const MAX_ENEMIES_TOTAL = 0;
@@ -852,6 +869,34 @@ canvas.addEventListener('touchcancel', (e) => {
             break;
           }
         }
+
+           // === PVP: попадание по другому игроку (сетевой танк) ===
+        const net = window.__NET;
+        if (net && net.others) {
+          for (const [id, op] of net.others) {
+            if (!op) continue;
+
+            const osize = op.size || 26;
+            const or = osize / 2;
+
+            // попадание пулей в AABB другого игрока
+            if (
+              b.x >= (op.x - or) && b.x <= (op.x + or) &&
+              b.y >= (op.y - or) && b.y <= (op.y + or)
+            ) {
+              // удаляем пулю локально
+              bullets.splice(i, 1);
+
+              // говорим серверу: я попал в игрока id
+              if (window.__NET_HIT_PLAYER) {
+                window.__NET_HIT_PLAYER({ targetId: id });
+              }
+              break;
+            }
+          }
+          if (i >= bullets.length) continue; // если пулю удалили — идём дальше
+        }
+
         if (i >= bullets.length) continue; // если пулю уже удалили — не продолжаем
 
         // тайл
@@ -878,6 +923,69 @@ canvas.addEventListener('touchcancel', (e) => {
         }
       }
     }
+
+          // === NET: ПУЛИ ДРУГИХ ИГРОКОВ ===
+      function updateNetEnemyShots() {
+        const net = window.__NET;
+        if (!net || !net.enemyShots) return;
+
+        for (let i = net.enemyShots.length - 1; i >= 0; i--) {
+          const b = net.enemyShots[i];
+
+          b.x += b.dx * BULLET_SPEED;
+          b.y += b.dy * BULLET_SPEED;
+
+          // улетела за экран
+          if (b.x < 0 || b.x > canvas.width || b.y < 0 || b.y > canvas.height) {
+            net.enemyShots.splice(i, 1);
+            continue;
+          }
+
+          // попадание в ТЕБЯ (локально)
+          const pr = player.size / 2;
+          if (
+            b.x >= player.x - pr && b.x <= player.x + pr &&
+            b.y >= player.y - pr && b.y <= player.y + pr
+          ) {
+            // говорим серверу: "меня попали, вот кто"
+            if (window.__NET_I_GOT_HIT) {
+              window.__NET_I_GOT_HIT(b.ownerId);
+            }
+            net.enemyShots.splice(i, 1);
+            continue;
+          }
+
+          // столкновение с картой (кирпич/сталь)
+          const tx = Math.floor(b.x / TILE_SIZE);
+          const ty = Math.floor(b.y / TILE_SIZE);
+          if (tx < 0 || tx >= GRID_SIZE || ty < 0 || ty >= GRID_SIZE) continue;
+
+          const tile = level[ty][tx];
+
+          if (tile === TILE.BRICK) {
+            // ломаем кирпич локально
+            applyBrickHit(tx, ty, b.dx, b.dy);
+            // серверу НЕ шлём brick_hit, потому что это пуля врага (враг сам уже шлёт)
+            net.enemyShots.splice(i, 1);
+            continue;
+          }
+
+          if (tile === TILE.STEEL) {
+            net.enemyShots.splice(i, 1);
+            continue;
+          }
+        }
+      }
+
+function drawNetEnemyShots() {
+  const net = window.__NET;
+  if (!net || !net.enemyShots) return;
+
+  ctx.fillStyle = "#a78bfa"; // фиолетовые пули врага (чтобы ты видел разницу)
+  for (const b of net.enemyShots) {
+    ctx.fillRect(b.x - b.size/2, b.y - b.size/2, b.size, b.size);
+  }
+}
 
     function updateEnemyBullets() {
       for (let i = enemyBullets.length - 1; i >= 0; i--) {
@@ -1166,6 +1274,7 @@ function drawMobileControls() {
         tryShoot();
        // updateEnemies();
         updateBullets();
+        updateNetEnemyShots();
        // updateEnemyBullets();
         //PVP MODE: enemies off
         if (playerInvuln > 0) playerInvuln--;
@@ -1174,6 +1283,7 @@ function drawMobileControls() {
        // drawEnemies();
         drawNetPlayers();
         drawBullets();
+        drawNetEnemyShots();
        // drawEnemyBullets();
        //PVP MODE: enemies off
         drawHUD();

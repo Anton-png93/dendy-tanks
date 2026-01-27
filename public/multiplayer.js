@@ -108,6 +108,11 @@ window.__NET_I_GOT_HIT = (byId) => {
   socket.emit("i_got_hit", { by: byId });
 };
 
+// index.html будет вызывать это когда ТЫ попал в другого игрока
+window.__NET_HIT_PLAYER = ({ targetId }) => {
+  socket.emit("player_hit", { targetId });
+};
+
 // отправка своего танка на сервер
 setInterval(() => {
   const t = getMyTank();
@@ -139,13 +144,21 @@ socket.on("brick_hit", (payload) => {
   if (window.applyBrickHitNet) window.applyBrickHitNet(payload);
 });
 
-// получаем обновление жизней (кому-то попали)
 socket.on("player_lives", (payload) => {
   if (!payload?.id) return;
+
   window.__NET.lives.set(payload.id, payload.lives);
 
-  // если это Я — обновим локальные жизни (index.html должен держать playerLives)
+  // если это Я — обновим локальные жизни
   if (payload.id === myId && typeof window.setMyLives === "function") {
     window.setMyLives(payload.lives);
+    return;
+  }
+
+  // если это НЕ я и у него 0 жизней — я победил
+  if (payload.id !== myId && payload.lives <= 0) {
+    if (typeof window.setWin === "function") {
+      window.setWin(payload.id);
+    }
   }
 });

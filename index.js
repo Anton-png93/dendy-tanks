@@ -93,6 +93,27 @@ socket.on("player_hit", ({ targetId }) => {
     id: targetId,
     lives: players[targetId].lives,
   });
+
+  // если игрок ещё жив — респавним на его spawn
+  if (players[targetId].lives > 0) {
+    const s = players[targetId].spawn;
+    players[targetId].x = s.x;
+    players[targetId].y = s.y;
+    players[targetId].dir = s.dir ?? 0;
+
+    // тому, кого убили/попали — отправляем me_spawn (он сам себя обновит)
+    const targetSocket = io.sockets.sockets.get(targetId);
+    if (targetSocket) {
+      targetSocket.emit("me_spawn", players[targetId]);
+    }
+
+    // всем остальным — чтобы они увидели телепорт
+    socket.broadcast.emit("player_update", {
+      id: targetId,
+      data: players[targetId],
+    });
+  }
+
 });
 
   // 4) выход
